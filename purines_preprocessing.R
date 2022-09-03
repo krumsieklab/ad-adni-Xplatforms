@@ -1,0 +1,240 @@
+# purines dataset - data cleaning and preprocessing
+#
+#
+# by RB, ZW
+# last update: 2022-09-03
+
+#### Setup ----
+
+# clear workspace
+rm(list = setdiff(ls(),c("codes.makepath","data.makepath","results.makepath"))) 
+# libraries
+library(MetaboTools) # MT 
+library(tidyverse) # %>%
+
+# Helper function
+read_list_from_file <- function(file) { 
+  # check if file is Excel format
+  if (!is.na(readxl::excel_format(path = file))) {
+    # load first column from first sheet
+    vec <- as.vector(read_excel(path=file, sheet = 1)[,1,drop=T])
+  } else {
+    # must be a text file
+    vec <- readLines(file)
+  }
+  # remove comments
+  vec <- gsub("#.*", "", vec)
+  # trim whitespaces
+  vec <- trimws(vec)
+  # remove empty entries
+  vec <- vec[nchar(vec)>0]
+  # return
+  vec
+}
+
+loe_cor <- function(data, ref, QCspan = 0.5, degree = 2){
+  injec_id <- ref[1,] %>% as.numeric()
+  injec_raw <- data[2,] %>% as.numeric()
+  for (i in 2:dim(ref)[1]) {
+    loe <- stats::loess(ref[i, ] ~ injec_id, span = QCspan, degree = degree)
+    yf<- predict(loe, injec_raw)
+    data[i+1, ] <- as.numeric(data[i+1, ])/yf
+  }
+  return(data)
+}
+
+#### Read input files ----
+
+# paths
+data_loc <- 'ADNI/Datasets/ADNI1_Purines/'
+anno_loc <- 'ADNI/Datasets/ADNI_metadata/'
+
+# output file
+output_se_qc <- 'processed_data/ADNI1_Purines_qc.rds'
+se_qc <- data.makepath(paste0(data_loc, output_se_qc))
+
+# read files
+raw_data <- read.csv(data.makepath(paste0(data_loc, 'raw_data/adni1.purines.raw.csv')), header = T)
+qc_data <- read.csv2(data.makepath(paste0(data_loc, 'raw_data/adni1.purines.raw.qc.nist.csv')),sep = ",",header = T)
+fast_stat <- read.csv2(data.makepath(paste0(anno_loc, 'FastingStatusADNI1.txt')), sep = "\t", as.is = T)
+meds <- read.csv2(data.makepath(paste0(anno_loc, 'MedicationsADNI1GO2.txt')), sep = "\t", as.is = T)
+outcomes <- read.csv(data.makepath(paste0(anno_loc, 'traits.csv')), header = T, as.is = T,stringsAsFactors = F)
+meds_to_exclude <- read_list_from_file(data.makepath(paste0(anno_loc, 'ADNI_meds_rm.txt'))) 
+
+
+#### Data cleaning ----
+
+# edit outcome name list
+# Remove the one used in confounding correction
+rows2rm <- c('ApoE4')
+# Rename outcomes for analysis
+outcomes1 <- outcomes %>% select(c('trait','var_type')) %>% rename(outcome=trait, type=var_type) %>% 
+  subset(!(outcome %in% rows2rm)) %>% as.matrix() %>% gsub('<', '_', .) %>% gsub('\\(', '_', .) %>% 
+  gsub('\\)', '_', .) %>% gsub('/', '_', .) %>% gsub('Diagnosis', 'Diag_num', .) 
+
+outcomes1 %<>% data.frame(row.names = 1:nrow(outcomes1) ,stringsAsFactors = F) 
+outcomes1 %>% write.table(data.makepath(paste0(anno_loc, 'adni_outcomes.csv')),sep = ",",row.names = F,quote = F)
+
+# harmonize raw data
+nist <- qc_data %>% column_to_rownames('NISTID') %>% t()
+raw <- raw_data %>% filter(Injection.Order >= 49 & Injection.Order <= 831) %>% arrange(Injection.Order) %>% t()
+raw_loe <- loe_cor(raw,nist,QCspan = 0.75)
+raw_data1 <- raw_loe %>% t() %>% as.data.frame() %>% arrange(RID)
+
+# define colums to be discarded
+cols2discard <- names(raw_data)[1:2]
+
+# colData
+sample_info <- raw_data %>% select(all_of(cols2discard)) %>% 
+  left_join(fast_stat, by='RID') %>% unique() %>%
+  left_join(meds, by='RID') %>% unique()
+
+# rowData
+met_info <- data.frame(col_ID=raw_data %>% select(-cols2discard) %>% names(), 
+                       name=raw_data %>% select(-cols2discard) %>% names())
+
+# assay
+raw_data <- raw_data %>% select(-cols2discard) %>% data.frame()%>%
+  mutate_all(as.matrix) %>% mutate_all(as.numeric) %>% t()
+
+
+#### Write output files ----
+
+# Summarazed Experiment
+D <- SummarizedExperiment::SummarizedExperiment(assays = raw_data,
+                                                colData = sample_info, rowData = met_info) %>% 
+  mt_files_write_SE(file = se_qc)
+
+# List for Medication correction
+meds_to_exclude <- D %>% colData %>% as_tibble() %>% names() %>% as.data.frame() %>% rownames_to_column() %>% 
+  column_to_rownames(var = '.') %>% t() %>% as.data.frame() %>% select(all_of(meds_to_exclude)) %>% 
+  as.matrix() %>% as.numeric()
+
+med_cols <- D %>% colData %>% as_tibble() %>% names() %>% grep(pattern = 'Med') %>% 
+  discard(~ .x %in% meds_to_exclude) %>% write.table(data.makepath(paste0(anno_loc, 'adni_medications.csv')),sep = ",",row.names = F,quote = F)
+
+
+
+
+### Setup ----
+
+# clear workspace
+rm(list = setdiff(ls(),c("codes.makepath","data.makepath","results.makepath")))
+# libraries
+library(MetaboTools) # MT 
+library(tidyverse) # %>%
+
+
+### File paths ----
+
+# Input files
+data_loc <- 'ADNI/Datasets/ADNI1_Purines/'
+anno_loc <- 'ADNI/Datasets/ADNI_metadata/'
+se_qc <- data.makepath(paste0(data_loc, 'processed_data/ADNI1_Purines_qc.rds'))
+file_anno <- data.makepath(paste0(anno_loc, 'adni1go2_phenotypes_covariates.xlsx'))
+file_outcome <- data.makepath(paste0(anno_loc, 'adni_outcomes.csv'))
+file_meds <- data.makepath(paste0(anno_loc, 'adni_medications.csv'))
+
+# Output files
+output_loc <- 'ADNI/Datasets/ADNI1_Purines/'
+file_output_pp_no_med <- results.makepath(paste0(output_loc,  'ADNI1_Purines_PP_no_med', '.html'))
+file_output_pp_med <- results.makepath(paste0(output_loc, 'ADNI1_Purines_PP_med', '.html'))
+se_output_pp_no_med <- results.makepath(paste0(output_loc, 'ADNI1_Purines_PP_no_med', '.rds'))
+se_output_pp_med <- results.makepath(paste0(output_loc, 'ADNI1_Purines_PP_med', '.rds'))
+file_output_analysis_med <- results.makepath(paste0(output_loc, 'ADNI_Purines_analysis' ,'.html'))
+se_output_analysis_med <- results.makepath(paste0(output_loc, 'ADNI1_Purines_analysis' ,'.rds'))
+
+
+### Load outcome and medication variable lists ----
+outcomes <- read.csv(file_outcome, header = T, as.is = T, stringsAsFactors = F)
+med_cols <- read.csv(file_meds,header = T, as.is = T, stringsAsFactors = F) %>% as.matrix() %>% as.numeric()
+
+
+### Start MT pipeline ----
+
+# Load the SummarizedExperiment (=data)
+load(se_qc)
+
+### QC ----
+
+# MT pipeline (starting with %<>%, since D from se_qc file is already a SummarizedExperiment)
+D %<>%
+  # Add CV from duplicated ids to rowData
+  mt_modify_cv(qc_samples = (RID%in%RID[duplicated(RID)]), 
+               col_lab = "Dup_cv", replicates=T, 
+               id_col='RID') %>%
+  # ICC for duplicates
+  mt_modify_icc(qc_samples = (RID%in%RID[duplicated(RID)]), col_lab = "Dup_icc", id_col='RID') %>%
+  mt_modify_mutate(anno_type = 'samples', col_name='Sample_ID', term=paste0('sample_', 1:length(RID))) %>%
+  {.}
+
+### Preprocess ----
+D %<>%  
+  # Headings
+  mt_reporting_heading(strtitle = "Preprocessing", lvl = 1) %>%
+  mt_reporting_heading(strtitle = "Filtering", lvl = 2) %>%
+  
+  # Filter out non-fasting samples 
+  mt_modify_filter_samples(BIFAST == "Yes") %>%
+  
+  # Filter out missing data for both metabolites and samples using the wrapper function
+  mtw_missingness(plot_options = list(met_max = 0.25,samp_max = 1),
+                  filter_options = list(met_max = 0.25,sample_max = 1)) %>%
+  
+  # Filter out metabolites with cv > 25% or ICC < 65%
+  mt_modify_filter_metabolites(Dup_cv <0.25 || Dup_icc >0.65) %>%
+  
+  # Preprocess
+  mt_reporting_heading(strtitle = "Normalization", lvl = 2) %>%
+  
+  mtw_preprocess(quot_options = list(met_max = 0),
+                 log_base = 2,do_impute = T) %>%
+  
+  # Average-combine duplicate samples
+  mt_modify_averagesample(group_by = "RID") %>%
+  
+  # Global outlier detection
+  mt_pre_outlier(method='mahalanobis', pval=0.01) %>%
+  
+  # Add dataset info
+  mt_reporting_heading(strtitle = "Dataset info", lvl = 2) %>%
+  
+  mt_logging_datasetinfo()
+{.}
+
+### Global statistics ----
+D %<>%  
+  
+  # Global stats as data overview
+  mt_reporting_heading(strtitle = "Global Statistics", lvl = 1) %>%
+  
+  mt_reporting_heading(strtitle = "Before filtering outliers", lvl = 2) %>%
+  
+  mtw_global_stats(annos_pca_umap = list('outlier_mahalanobis'),
+                   pca_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
+                   umap_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
+                   heatmap_options = list(scaledata = T, fontsize = 5)) %>%
+  
+  mt_modify_filter_samples(outlier_mahalanobis != TRUE) %>%
+  
+  mt_reporting_heading(strtitle = "After filtering outliers", lvl = 2) %>%
+  
+  mtw_global_stats(pca_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
+                   umap_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
+                   do_pheatmap = F) %>%
+  
+  # Report before medication correction
+  mt_reporting_html(outfile=file_output_pp_no_med, output.calls = T) %>%
+  # Save SE before medication correction
+  mt_files_write_SE(file = se_output_pp_no_med) %>%
+  
+  # Medication correction
+  mt_reporting_heading(strtitle = "Medication correction", lvl = 2) %>%
+  
+  mt_pre_confounding_correction_stepwise_aic(cols_to_cor = med_cols) %>%
+  
+  # Report after medication correction
+  mt_reporting_html(outfile=file_output_pp_med, output.calls = T) %>%
+  # Save SE after medication correction
+  mt_files_write_SE(file = se_output_pp_med) %>%
+  {.}
