@@ -27,7 +27,11 @@ loe_cor <- function(data, ref, QCspan = 0.5, degree = 2){
 # paths
 data_loc <- 'ADNI/Datasets/ADNI1_Purines/'
 anno_loc <- 'ADNI/Datasets/ADNI_metadata/'
-
+data_file <- data.makepath(paste0(data_loc, 'raw_data/adni1.purines.raw.csv'))
+qc_file <- data.makepath(paste0(data_loc, 'raw_data/adni1.purines.raw.qc.nist.csv'))
+fasting_file <- data.makepath(paste0(anno_loc, 'FastingStatusADNI1.txt'))
+med_file <- data.makepath(paste0(anno_loc, 'MedicationsADNI1GO2.txt'))
+meds_to_exclude <- c("Med.Anticholinesterases","Med.NMDAAntag") # meds to exclude
 
 # output file
 output_mt_ready <- '2022-09-03_purines.xlsx'
@@ -35,14 +39,12 @@ output_pp_no_med <- '2022-09-03_purines_preprocessing.xlsx'
 output_pp_med <-  '2022-09-03_purines_preprocessing_medcor.xlsx'
 
 # read files
-raw_data <- read.csv(data.makepath(paste0(data_loc, 'raw_data/adni1.purines.raw.csv')), header = T)
-qc_data <- read.csv2(data.makepath(paste0(data_loc, 'raw_data/adni1.purines.raw.qc.nist.csv')),sep = ",",header = T)
-fast_stat <- read.csv2(data.makepath(paste0(anno_loc, 'FastingStatusADNI1.txt')), sep = "\t", as.is = T)
-meds <- read.csv2(data.makepath(paste0(anno_loc, 'MedicationsADNI1GO2.txt')), sep = "\t", as.is = T)
-
+raw_data <- read.csv(data_file, header = T)
+qc_data <- read.csv2(qc_file,sep = ",",header = T)
+fast_stat <- read.csv2(fasting_file, sep = "\t", as.is = T)
+meds <- read.csv2(med_file, sep = "\t", as.is = T)
 
 # data cleaning
-
 # harmonize raw data
 nist <- qc_data %>% column_to_rownames('NISTID') %>% t()
 raw <- raw_data %>% filter(Injection.Order >= 49 & Injection.Order <= 831) %>% arrange(Injection.Order) %>% t()
@@ -77,6 +79,7 @@ D %<>%
   mt_pre_icc(qc_samples = (RID%in%RID[duplicated(RID)]), out_col = "Dup_icc", id_col='RID') %>%
   mt_anno_mutate(anno_type = 'samples', col_name='Sample_ID', term=paste0('sample_', 1:length(RID))) %>%
   {.}
+mt_write_se_xls(D, file=output_mt_ready)
 
 # preprocessing 
 D %<>%
@@ -99,23 +102,34 @@ D %<>%
   mt_anno_missingness(anno_type = "features", out_col = "missing") %>%
   # filter out metabolites with cv > 25% or ICC < 65%
   mt_modify_filter_metabolites(Dup_cv < 0.25 || Dup_icc > 0.65) %>%
-  # Log2 transformation
+  # normalization
+  mt_reporting_heading(heading = "Normalization", lvl = 2) %>%
+  # pre-normalization sample boxplot
+  mt_plots_sample_boxplot(title = "Before normalization") %>%
+  # normalize abundances using probabilistic quotient
+  mt_pre_norm_quot(feat_max = 0.4) %>%
+  # post-normalization sample boxplot
+  mt_plots_sample_boxplot(title = "After normalization") %>%
+  # dilution plot showing dilution factors from quotient normalization
+  mt_plots_dilution_factor(boxpl = T, in_col = 'BIFAST')  %>%
+  # log2 transformation
   mt_pre_trans_log() %>%
-  mt_reporting_heading(heading ="Imputation", lvl = 2) %>%
-  # plot pre-imputation sample boxplot
+  mt_reporting_heading(heading = "Imputation", lvl = 2) %>%
+  # pre-imputation sample boxplot
   mt_plots_sample_boxplot(title = "Before imputation") %>%
-  # impute missing values
-  mt_pre_impute_knn() %>%
-  # plot post-imputation sample boxplot
+  mt_pre_impute_knn() %>% 
+  # post-imputation sample boxplot
   mt_plots_sample_boxplot(title = "After imputation") %>%
-  # Average-combine duplicate samples
-  mt_modify_avg_samples(group_col =  "RID") %>%
-  
+  # average-combine duplicate samples
+  mt_modify_avg_samples(group_col = "RID") %>%
   {.}
+
 # outlier detection and adjustments
 # identify metabolite level outliers -> set to NA -> impute
 D %<>%   # sample outlier detection
   
+  # WINSORIZING & RE-IMPUTATION : Local outlier correction
+  mt_pre_outlier_detection_leverage(thresh = 4) %>%
   # Global outlier detection
   #mt_pre_outlier(method='leverage', pval=0.01) %>%
   
@@ -144,6 +158,7 @@ med_cols <- all_cols[grep("Med", all_cols)] # column numbers of all meds
 med_cols <- med_cols[which(med_cols%in%meds_to_exclude==F)] # meds to correct
 
 # medication correction
-Dmc <- D %>% mt_pre_confounding_correction_stepaic(cols_to_correct = med_cols, cols_to_exclude = meds_to_exclude)
+Dmc <- D %>% mt_pre_confounding_correction_stepaic(cols_to_correct = med_cols, 
+                                                   cols_to_exclude = meds_to_exclude, n_cores = 40)
 
 mt_write_se_xls(Dmc, file=output_pp_med)

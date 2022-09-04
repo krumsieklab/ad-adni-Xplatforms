@@ -1,4 +1,4 @@
-# Nightingale lipoproteins dataset - data cleaning and preprocessing
+# nightingale lipoproteins dataset - data cleaning and preprocessing
 #
 #
 # by RB
@@ -13,29 +13,33 @@ library(tidyverse) # %>%
 
 # input
 data_loc <- '/ADNI/Datasets/ADNI1_GO2_Baseline_Nightingale/'
-data_file <- 'raw_data/16033-30-Sep-2020-Results.xlsx'
-metadata <- 'meta_data/Nightingale_unblinding_sampleid_RID.xlsx'
-anno_file <- '/ADNI/Datasets/ADNI_metadata/adni1go2_phenotypes_covariates.xlsx'
-batch_file <- '/ADNI/Datasets/ADNI_metadata/ADNI_Batch.xlsx'
+anno_loc <- '/ADNI/Datasets/ADNI_metadata/'
+data_file <- data.makepath(paste0(data_loc, '/raw_data/16033-30-Sep-2020-Results.xlsx'))
+metadata <- data.makepath(paste0(data_loc,'/meta_data/Nightingale_unblinding_sampleid_RID.xlsx'))
+anno_file <- data.makepath(paste0(anno_loc,'/adni1go2_phenotypes_covariates.xlsx'))
+batch_file <- data.makepath(paste0(anno_loc,'/ADNI_Batch.xlsx'))
 meds_to_exclude <- c("Med.Anticholinesterases","Med.NMDAAntag") # meds to exclude
 
 # output files 
-output_pp_no_med <- '2022-09-03_ADNI_Nightingale_Baseline.xlsx'
-output_pp_med <- '2022-09-03_ADNI_Nightingale_Baseline_medcor.xlsx'
+output_mt_ready <- '2022-09-03_ADNI_Nightingale_Baseline.xlsx'
+output_pp_no_med <- '2022-09-03_ADNI_Nightingale_Baseline_preprocessed.xlsx'
+output_pp_med <- '2022-09-03_ADNI_Nightingale_Baseline_preprocessed_medcor.xlsx'
 
 # load data
-D <- mt_load_nightingale (file=data.makepath(paste0(data_loc, data_file)), 
+D <- mt_load_nightingale (file=data_file, 
                           format_type = 'multiple_sheets_v1') %>%
   # print infos about dataset
   mt_reporting_data()%>%
   mt_anno_mutate(anno_type = 'samples', col_name = 'Sample_id', term=gsub('-', '_', Sample_id)) %>%
   # load sample annotations
-  mt_anno_xls(file=data.makepath(paste0(data_loc, metadata)),sheet=1, 
+  mt_anno_xls(file=metadata,sheet=1, 
               anno_type="samples", anno_id_col="sampleid", data_id_col="Sample_id") %>%
   # load batch annotations
-  mt_anno_xls(file=data.makepath(batch_file),sheet=1, 
+  mt_anno_xls(file=batch_file,sheet=1, 
               anno_type="samples", anno_id_col="RID", data_id_col="RID") %>%
   {.}
+
+mt_write_se_xls(D, file=output_mt_ready)
 
 # qc
 D <- D %>% mt_anno_mutate(anno_type = "samples", col_name = "Low_protein",
@@ -103,6 +107,7 @@ med_cols <- all_cols[grep("Med", all_cols)] # column numbers of all meds
 med_cols <- med_cols[which(med_cols%in%meds_to_exclude==F)] # meds to correct
 
 # medication correction
-Dmc <- D %>% mt_pre_confounding_correction_stepaic(cols_to_correct = med_cols, cols_to_exclude = meds_to_exclude)
+Dmc <- D %>% mt_pre_confounding_correction_stepaic(cols_to_correct = med_cols, 
+                                                   cols_to_exclude = meds_to_exclude, n_cores = 40)
 
 mt_write_se_xls(Dmc, file=output_pp_med)

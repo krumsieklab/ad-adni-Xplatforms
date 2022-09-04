@@ -15,26 +15,33 @@ library(tidyverse) # %>%
 
 # helper function
 combine_cvs <- function(D0){
+  # select pqc_cv columns in the row data and create a vector
   pqc <- D0 %>% rowData() %>% data.frame() %>% 
     select(starts_with('PQC_cv')) %>% data.frame() %>%
     cbind(replicate(length(grep("PQC", D0$QCID)), .$'PQC_cv'))
+  # select aqc_cv columns in the row data and create a vector
   aqc <- D0 %>% rowData() %>% data.frame() %>% 
     select(starts_with('AQC_cv')) %>% data.frame() %>%
     cbind(replicate(length(grep("A_QC", D0$QCID)), .$'AQC_cv'))
+  # identify duplicates
   dups <- D0 %>% rowData() %>% data.frame() %>% 
     select(starts_with('Dup_cv')) %>% data.frame() %>%
     cbind(replicate(length((D0$QCID=='' & D0$RID%in%D0$RID[duplicated(D0$RID)])), .$'Dup_cv'))
+  # bind together
   cvs <- bind_cols(pqc, aqc, dups) %>% rowMeans(na.rm = T)
+  # add a mean
   rowData(D0)$Combine_cv <- cvs
   return(D0)
 }
 
 # input
 data_loc <- 'ADNI/Datasets/ADNI1_Baker_Lipidomics/'
-data_file <- 'raw_data/Baker_LIPIDOMICSDATABASE_03_05_19.csv'
-fasting_file <- 'meta_data/FastingStatusADNI1.txt'
-med_file <- 'meta_data/MedicationsADNI1GO2.txt'
-met_file <- 'raw_data/Baker_LIPIDOMICSDATABASE_DICT.csv'
+anno_loc <- '/ADNI/Datasets/ADNI_metadata/'
+data_file <- data.makepath(paste0(data_loc,'raw_data/Baker_LIPIDOMICSDATABASE_03_05_19.csv'))
+met_file <- data.makepath(paste0(data_loc,'raw_data/Baker_LIPIDOMICSDATABASE_DICT.csv'))
+fasting_file <- data.makepath(paste0(anno_loc,'FastingStatusADNI1.txt'))
+med_file <- data.makepath(paste0(anno_loc,'MedicationsADNI1GO2.txt'))
+meds_to_exclude <- c("Med.Anticholinesterases","Med.NMDAAntag") # meds to exclude
 
 # output files
 output_mt_ready <- '2022-09-03_baker_lipidomics.xlsx'
@@ -42,9 +49,9 @@ output_pp_no_med <- '2022-09-03_baker_lipidomics_preprocessing.xlsx'
 output_pp_med <-  '2022-09-03_baker_lipidomics_preprocessing_medcor.xlsx'
 
 # read input
-raw_data <- read.csv(data.makepath(paste0(data_loc, data_file)), header = T)
-fast_stat <- read.csv2(data.makepath(paste0(data_loc, fasting_file)), sep = "\t")
-meds <- read.csv2(data.makepath(paste0(data_loc, med_file)), sep = "\t")
+raw_data <- read.csv(data_file, header = T)
+fast_stat <- read.csv2(fasting_file, sep = "\t")
+meds <- read.csv2(med_file, sep = "\t")
 # define columns that are sample information and to be discarded from measurements sheet and metabolite information sheet
 samp_info_cols <- c("RID", "VIALID", "QCID", "ANALYSIS_START_DATE", "update_stamp")
 
@@ -57,7 +64,7 @@ sample_info <- raw_data %>% select(all_of(samp_info_cols)) %>%
 raw_data <- raw_data %>% select(-samp_info_cols) %>% t()
 
 # rowData
-met_info <- read.csv(data.makepath(paste0(data_loc, met_file)), header = T) %>%
+met_info <- read.csv(met_file, header = T) %>%
   select(FLDNAME, NOTES) %>% dplyr::rename(col_ID=FLDNAME, name=NOTES) %>%
   filter(!col_ID%in%samp_info_cols)
 
@@ -71,8 +78,7 @@ D %<>%
   mt_pre_cv(qc_samples = QCID == "PQC", out_col = "PQC_cv")%>%
   mt_pre_cv(qc_samples = QCID == "A_QC", out_col = "AQC_cv") %>%
   mt_pre_cv(qc_samples = (QCID=='' & RID%in%RID[duplicated(RID)]), 
-            out_col = "Dup_cv", replicates=T, 
-            id_col='RID') %>%
+            out_col = "Dup_cv", replicates=T, id_col='RID') %>%
   # combine 3 CVs
   combine_cvs() %>% 
   # ICC for duplicates
@@ -84,21 +90,12 @@ D %<>%
 
 mt_write_se_xls(D, file=output_mt_ready)
 
-# add annotations
-D <- 
-  # load metabolite annotations
-  mt_anno_xls(file=file_data, sheet="metinfo",anno_type="features", anno_id_col="name", data_id_col="name") %>%
-  # load clinical annotations
-  mt_anno_xls(file=file_data, sheet="sampleinfo", anno_type="samples", anno_id_col="Sample_ID", data_id_col="Sample_ID") %>%
-  # print infos about dataset
-  mt_reporting_data()
-
 # preprocessing
 D %<>%
   mt_reporting_heading(heading= "Preprocessing", lvl = 1) %>%
   mt_reporting_heading(heading = "Filtering", lvl = 2) %>%
   # filter out non-fasting samples (as well as QC samples)
-  mt_modify_filter_samples(BIFAST == "Yes"|is.na(BIFAST)) %>%
+  mt_modify_filter_samples(BIFAST == "Yes") %>%
   # section text
   mt_reporting_text(text = "Plot percent missingness for each metabolite before filtering, filter out metabolites with >= 40%
                     missingness, plot percent missingness for each metabolite after filtering, add missingness annotation
@@ -127,10 +124,6 @@ D %<>%
   mt_plots_dilution_factor(boxpl = T, in_col = 'BIFAST')  %>%
   # log2 transformation
   mt_pre_trans_log() %>%
-  # sacling
-  mt_pre_trans_scale() %>%
-  # WINSORIZING & RE-IMPUTATION : Local outlier correction
-  mt_pre_outlier_detection_leverage(thresh = 4) %>%
   mt_reporting_heading(heading = "Imputation", lvl = 2) %>%
   # pre-imputation sample boxplot
   mt_plots_sample_boxplot(title = "Before imputation") %>%
@@ -141,6 +134,24 @@ D %<>%
   mt_modify_avg_samples(group_col = "RID") %>%
   {.}
 
+# outlier detection and adjustments
+# identify metabolite level outliers -> set to NA -> impute
+D %<>%   # sample outlier detection
+  
+  # WINSORIZING & RE-IMPUTATION : Local outlier correction
+  mt_pre_outlier_detection_leverage(thresh = 4) %>%
+  # Global outlier detection
+  #mt_pre_outlier(method='leverage', pval=0.01) %>%
+  
+  #mt_modify_filter_samples(outlier_leverage != TRUE) %>%
+  #mt_pre_outlier_detection_mahalanobis(pval=0.01) %>%  The data matrix is not full-rank, Mahalanobis cannot be computed
+  #mt_pre_outlier_lof(seq_k = c(5, 10, 20, 30, 40, 50)) %>% # local outlier factor
+  mt_pre_outlier_to_na(use_quant=TRUE, quant_thresh =0.025) %>% 
+  mt_pre_impute_knn() %>%
+  {.}
+
+  
+  
 # data overview plots
 D %<>% mt_reporting_heading(heading  = "Global Statistics", lvl = 2) %>%
   # plot PCA
@@ -159,6 +170,7 @@ med_cols <- all_cols[grep("Med", all_cols)] # column numbers of all meds
 med_cols <- med_cols[which(med_cols%in%meds_to_exclude==F)] # meds to correct
 
 # medication correction
-Dmc <- D %>% mt_pre_confounding_correction_stepaic(cols_to_correct = med_cols, cols_to_exclude = meds_to_exclude)
+Dmc <- D %>% mt_pre_confounding_correction_stepaic(cols_to_correct = med_cols, 
+                                                   cols_to_exclude = meds_to_exclude, n_cores = 40)
 
 mt_write_se_xls(Dmc, file=output_pp_med)
