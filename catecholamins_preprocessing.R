@@ -1,37 +1,15 @@
 # Catecholamine dataset - data cleaning and preprocessing
 #
 #
-# by RB, ZW
-# last update: 2022-09-03
-
+# by ZW and RB
+# last update: 2022-09-04
 
 # clear workspace
 rm(list = setdiff(ls(),c("codes.makepath","data.makepath","results.makepath"))) 
 # libraries
-library(maplet) #
+library(openxlsx) # for excel reading and writing
+library(maplet) # maplet 
 library(tidyverse) # %>%
-
-# helper function
-read_list_from_file <- function(file) {
-  # check if file is Excel format
-  if (!is.na(readxl::excel_format(path = file))) {
-    # load first column from first sheet
-    vec <- as.vector(read_excel(path=file, sheet = 1)[,1,drop=T])
-  } else {
-    # must be a text file
-    vec <- readLines(file)
-  }
-  # remove comments
-  vec <- gsub("#.*", "", vec)
-  # trim whitespaces
-  vec <- trimws(vec)
-  # remove empty entries
-  vec <- vec[nchar(vec)>0]
-  # return
-  vec
-}
-
-#### Read input files ----
 
 # input
 data_loc <- 'ADNI/Datasets/ADNI1_Catecholamines/'
@@ -40,118 +18,143 @@ anno_loc <- 'ADNI/Datasets/ADNI_metadata/'
 # read input
 raw_data <- read.csv(data.makepath(paste0(data_loc, 'raw_data/Catecholamines_unblinded_2019-02-25.csv')), header = T)
 qc_data <- read.csv2(data.makepath(paste0(data_loc, 'raw_data/Catecholamine_QC_new.csv')), sep = ",",header = T)
-fasting <- read.csv2(data.makepath(paste0(anno_loc, 'FastingStatusADNI1.txt')), sep = "\t", as.is = T)
-
+fast_stat <- read.csv2(data.makepath(paste0(anno_loc, 'FastingStatusADNI1.txt')), sep = "\t", as.is = T)
+meds <- read.csv2(data.makepath(paste0(anno_loc, 'MedicationsADNI1GO2.txt')), sep = "\t", as.is = T)
 # output files
-output_pp_no_med <- 'catecholamines_preprocessing.xlsx'
-output_pp_med <-  'catecholamines_preprocessing_medcor.xlsx'
+output_mt_ready <- '2022-09-03_catecholamines.xlsx'
+output_pp_no_med <- '2022-09-03_catecholamines_preprocessing.xlsx'
+output_pp_med <-  '2022-09-03_catecholamines_preprocessing_medcor.xlsx'
 
-#### Data cleaning ----
+# sample measurements cleaning
+  # remove space in samples names of raw data
+raw_ids <- raw_data %>% mutate(Sample.Name=gsub('\\s*', '', Sample.Name)) %>%
+  # add batch information 
+  mutate(Batch_id = gsub('*.[A-Z]','',Sample.Name),
+         Batch_id=as.numeric(as.matrix(Batch_id))) %>% 
+  # remove uninformative samples
+  select(-c('X', 'Pt_ID')) %>%
+  # order columns
+  select(RID, Sample.Name, Batch_id) %>%
+  {.}
+# function to remove less than sign from LOD values
+rem_sp_char <- function(x){ gsub('<', '', x) } 
+# measurements of samples, remove special characters and make numeric
+raw_data %<>% select(-c(RID, X, Pt_ID, Sample.Name)) %>% 
+ mutate_all(rem_sp_char)%>% 
+  mutate_all(as.matrix) %>%
+  mutate_all(as.numeric)
+  # bind ids and measurements
+raw_data <- bind_cols(raw_ids, raw_data)
 
-# define columns to be discarded
-cols2discard <- c('X','RID','Pt_ID','Sample.Name','Batch_id')
-qc_data1 <- qc_data[qc_data %>% select(Sample.Name) %>% as.matrix() %>% grep(pattern = 'NIST'),]
-qc_data <- qc_data1 %>% mutate(RID = as.integer(rep('99999',nrow(qc_data1))))
-raw_data1 <- raw_data %>% as.matrix() %>% gsub(' E','E',.) %>% gsub('^([1-9][A-Z])([1-9])$','\\10\\2',.) %>% 
-  as.data.frame(stringsAsFactors = F) %>% arrange(Sample.Name) %>% mutate(RID = as.integer(RID)) %>%
-  mutate(Batch_id = c(rep(1:10,each = 76),rep(11,32)))
+# qc measurements cleaning
+  # identify qc - nist samples
+qc_data <-  qc_data[grep(pattern = 'NIST', qc_data$Sample.Name),]
+  # separate ids of the qc samples 
+qc_ids <- qc_data %>% mutate(RID = as.integer(rep('99999',nrow(qc_data)))) %>%
+  # order columns
+  select(RID, Sample.Name, Batch_id)
+  # measurements of qc samples
+qc_data %<>% select(-c(Sample.Name, Batch_id)) %>% mutate_all(as.matrix) %>%
+  mutate_all(as.numeric)
+  # bind ids and measurements
+qc_data <- bind_cols(qc_ids, qc_data)
 
-raw_data <- bind_rows(raw_data1, qc_data %>% select(all_of(names(raw_data1 %>% select(-c(X, Pt_ID))))))
+# add qc data to raw_data
+raw_data <- bind_rows(raw_data, qc_data)
 
-#sample_info
+# define columns that are sample information and to be discarded from measurements sheet and metabolite information sheet
+samp_info_cols <- c('RID','Sample.Name','Batch_id')
+
 # colData
-sample_info <- raw_data %>% select(all_of(cols2discard)) %>% 
+sample_info <- raw_data %>% select(all_of(samp_info_cols)) %>% 
   left_join(fast_stat, by='RID') %>% 
   left_join(meds, by='RID')
-
 # rowData
-met_info <- data.frame(col_ID=raw_data %>% select(-cols2discard) %>% names(), 
-                       name=raw_data %>% select(-cols2discard) %>% names())
+met_info <- data.frame(col_ID=raw_data %>% select(-all_of(samp_info_cols)) %>% names(), 
+                       name=raw_data %>% select(-all_of(samp_info_cols)) %>% names())
 
 # assay
-raw_data <- raw_data %>% select(-cols2discard) %>% data.frame()%>%
+raw_data <- raw_data %>% select(-samp_info_cols) %>% data.frame()%>%
   mutate_all(as.matrix) %>% mutate_all(as.numeric) %>% t()
 
-
-#### Write output files ----
-
-# Summarazed Experiment
+# create summarized Experiment
 D <- SummarizedExperiment::SummarizedExperiment(assays = raw_data,
                                                 colData = sample_info, rowData = met_info)
 
-### QC ----
-
-# MT pipeline (starting with %<>%, since D from se_qc file is already a SummarizedExperiment)
+mt_write_se_xls(D, file=output_mt_ready)
+# qc
 D %<>%
-  # Nist based correction
-  mt_pre_nist_based_correction(qc_samples= RID == 99999,
+  # mist based correction
+  mt_pre_reference_correction(qc_samples= RID == 99999,
                                plate_col= 'Batch_id') %>%
-  # Add CV from duplicated ids to rowData
-  mt_modify_cv(qc_samples = (RID%in%RID[duplicated(RID)]), 
-               col_lab = "Dup_cv", replicates=T, 
+  # add cv from duplicated ids to rowData
+  mt_pre_cv(qc_samples = (RID%in%RID[duplicated(RID)]), 
+               out_col = "Dup_cv", replicates=T, 
                id_col='RID') %>%
-  # ICC for duplicates
-  mt_modify_icc(qc_samples = (RID%in%RID[duplicated(RID)]), col_lab = "Dup_icc", id_col='RID') %>%
-  mt_modify_mutate(anno_type = 'samples', col_name='Sample_ID', term=paste0('sample_', 1:length(RID))) %>%
+  # icc for duplicates
+  mt_pre_icc(qc_samples = (RID%in%RID[duplicated(RID)]), out_col = "Dup_icc", id_col='RID') %>%
+  mt_anno_mutate(anno_type ='samples', col_name='Sample_ID', term=paste0('sample_', 1:length(RID))) %>%
   {.}
 
-### Preprocess ----
-D %<>%  
-  # Headings
-  mt_reporting_heading(strtitle = "Preprocessing", lvl = 1) %>%
-  mt_reporting_heading(strtitle = "Filtering", lvl = 2) %>%
-  
+# preprocessing 
+D %<>%
+  mt_reporting_heading(heading = "Preprocessing", lvl = 1) %>%
   # Filter out non-fasting samples 
   mt_modify_filter_samples(BIFAST == "Yes") %>%
-  
-  # Filter out missing data for both metabolites and samples using the wrapper function
-  mtw_missingness(plot_options = list(met_max = 0.25,samp_max = 1),
-                  filter_options = list(met_max = 0.25,sample_max = 1)) %>%
-  
-  # Filter out metabolites with cv > 25% or ICC < 65%
-  #mt_modify_filter_metabolites(Dup_cv <0.25 || Dup_icc >0.65) %>%
-  
-  # Preprocess using the wrapper function
-  mt_reporting_heading(strtitle = "Log transformation", lvl = 2) %>%
-  
+  mt_reporting_heading(heading = "Missingness", lvl = 2) %>%
+  mt_pre_zero_to_na() %>%
+  mt_reporting_heading(heading = "Before filtering", lvl = 3) %>%
+  # plot pre-filtering missingness distribution
+  mt_plots_missingness(feat_max=0.4) %>%
+  # Filter out metabolites with more than 40% missingness
+  mt_pre_filter_missingness(feat_max = 0.4) %>%
+  # Filter out samples with more than 40% missingness
+  mt_pre_filter_missingness(samp_max = 0.4) %>%
+  mt_reporting_heading(heading  = "After filtering", lvl = 3) %>%
+  # plot pre-filtering missingness distribution
+  mt_plots_missingness(feat_max=0.4) %>%
+  # add missingness percentage as annotation to metabolites
+  mt_anno_missingness(anno_type = "features", out_col = "missing") %>%
   # Log2 transformation
-  mt_pre_trans_log(base = 2) %>%
-  
-  mt_reporting_heading(strtitle = "Imputation", lvl = 2) %>%
-  
-  # pre-imputation sample boxplot
-  mt_plots_sampleboxplot(plottitle = "Before imputation") %>%
-  
-  mt_pre_impute_knn() %>% 
-  
-  # post-imputation sample boxplot
-  mt_plots_sampleboxplot(plottitle = "After imputation") %>%
-  
+  mt_pre_trans_log() %>%
+  mt_reporting_heading(heading ="Imputation", lvl = 2) %>%
+  # plot pre-imputation sample boxplot
+  mt_plots_sample_boxplot(title = "Before imputation") %>%
+  # impute missing values
+  mt_pre_impute_knn() %>%
+  # plot post-imputation sample boxplot
+  mt_plots_sample_boxplot(title = "After imputation") %>%
   # Average-combine duplicate samples
-  mt_modify_averagesample(group_by = "RID") %>%
+  mt_modify_avg_samples(group_col =  "RID") %>%
   
-  # Add dataset info
-  mt_reporting_heading(strtitle = "Dataset info", lvl = 2) %>%
-  
-  mt_logging_datasetinfo()
-{.}
-
-### Global statistics ----
-D %<>%  
-  
-  # Global stats as data overview
-  mt_reporting_heading(strtitle = "Global Statistics", lvl = 1) %>%
-  
-  mtw_global_stats(pca_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
-                   umap_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
-                   heatmap_options = list(scaledata = T, fontsize = 5)) %>%
-  
-  # Global outlier detection
-  mt_pre_outlier(method='mahalanobis', pval=0.01) %>%
-  
-  mt_modify_filter_samples(outlier_mahalanobis != TRUE) %>%
-  
-  mtw_global_stats(pca_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
-                   umap_options = list(scaledata = T, size = 2, ggadd=quote(scale_size_identity())),
-                   do_pheatmap = F) %>%
   {.}
+# outlier detection and adjustments
+# identify metabolite level outliers -> set to NA -> impute
+D %<>%   # sample outlier detection
+  #mt_pre_outlier_detection_mahalanobis(pval=0.01) %>%  The data matrix is not full-rank, Mahalanobis cannot be computed
+  mt_pre_outlier_lof(seq_k = c(5, 10, 20, 30, 40, 50)) %>% # local outlier factor
+  mt_pre_outlier_to_na(use_quant=TRUE, quant_thresh =0.025) %>% 
+  mt_pre_impute_knn() %>%
+  {.}
+
+# data overview plots
+D %<>% mt_reporting_heading(heading  = "Global Statistics", lvl = 2) %>%
+  # plot PCA
+  mt_plots_pca(scale_data = T, title = "PCA", size=2.5, ggadd=scale_size_identity()) %>%
+  # plot UMAP
+  mt_plots_umap(scale_data = T, title = "UMAP", size=2.5, ggadd=scale_size_identity()) %>%
+  # plot heatmap
+  mt_plots_heatmap(scale_data = T, fontsize = 5) %>%
+  {.}
+
+mt_write_se_xls(D, file=output_pp_no_med)
+
+# medication correction [non maplet]
+all_cols <- D %>% colData %>% as_tibble() %>% names()
+med_cols <- all_cols[grep("Med", all_cols)] # column numbers of all meds
+med_cols <- med_cols[which(med_cols%in%meds_to_exclude==F)] # meds to correct
+
+# medication correction
+Dmc <- D %>% mt_pre_confounding_correction_stepaic(cols_to_correct = med_cols, cols_to_exclude = meds_to_exclude)
+
+mt_write_se_xls(Dmc, file=output_pp_med)
